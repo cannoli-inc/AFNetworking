@@ -255,24 +255,23 @@ expectedTotalBytes:(int64_t)expectedTotalBytes {
 
 #pragma mark -
 
-/*
- A workaround for issues related to key-value observing the `state` of an `NSURLSessionTask`.
-
- See https://github.com/AFNetworking/AFNetworking/issues/1477
+/**
+ *  A workaround for issues related to key-value observing the `state` of an `NSURLSessionTask`.
+ *
+ *  See:
+ *  - https://github.com/AFNetworking/AFNetworking/issues/1477
+ *  - https://github.com/AFNetworking/AFNetworking/issues/2638
+ *  - https://github.com/AFNetworking/AFNetworking/pull/2702
  */
 
 static inline void af_swizzleSelector(Class class, SEL originalSelector, SEL swizzledSelector) {
     Method originalMethod = class_getInstanceMethod(class, originalSelector);
     Method swizzledMethod = class_getInstanceMethod(class, swizzledSelector);
-    if (class_addMethod(class, originalSelector, method_getImplementation(swizzledMethod), method_getTypeEncoding(swizzledMethod))) {
-        class_replaceMethod(class, swizzledSelector, method_getImplementation(originalMethod), method_getTypeEncoding(originalMethod));
-    } else {
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-    }
+    method_exchangeImplementations(originalMethod, swizzledMethod);
 }
 
-static inline void af_addMethod(Class class, SEL selector, Method method) {
-    class_addMethod(class, selector,  method_getImplementation(method),  method_getTypeEncoding(method));
+static inline BOOL af_addMethod(Class class, SEL selector, Method method) {
+    return class_addMethod(class, selector,  method_getImplementation(method),  method_getTypeEncoding(method));
 }
 
 static NSString * const AFNSURLSessionTaskDidResumeNotification  = @"com.alamofire.networking.nsurlsessiontask.resume";
@@ -282,22 +281,6 @@ static NSString * const AFNSURLSessionTaskDidSuspendNotification = @"com.alamofi
 @end
 
 @implementation NSURLSessionTask (_AFStateObserving)
-
-+ (void)initialize {
-    if ([NSURLSessionTask class]) {
-        NSURLSessionDataTask *dataTask = [[NSURLSession sessionWithConfiguration:nil] dataTaskWithURL:nil];
-        Class taskClass = [dataTask superclass];
-
-        af_addMethod(taskClass, @selector(af_resume),  class_getInstanceMethod(self, @selector(af_resume)));
-        af_addMethod(taskClass, @selector(af_suspend), class_getInstanceMethod(self, @selector(af_suspend)));
-        af_swizzleSelector(taskClass, @selector(resume), @selector(af_resume));
-        af_swizzleSelector(taskClass, @selector(suspend), @selector(af_suspend));
-
-        [dataTask cancel];
-    }
-}
-
-#pragma mark -
 
 - (void)af_resume {
     NSURLSessionTaskState state = self.state;
@@ -317,6 +300,53 @@ static NSString * const AFNSURLSessionTaskDidSuspendNotification = @"com.alamofi
     }
 }
 
+@end
+
+@interface _AFURLSessionTaskSwizzling : NSObject
+
+@end
+
+@implementation _AFURLSessionTaskSwizzling
+
++ (void)load {
+    /**
+     *  Due to the class cluster nature of an NSURLSessionTask and varying class hierarchy between iOS 7 and 8,
+     *  swizzling the implementation of the resume and suspend methods is quite complicated. In both versions of
+     *  iOS, the METHOD IMPs reside in the  reside in the `__NSCFLocalSessionTask` private class. This means
+     *  that the class `load` method cannot be overridden directly since it's a private class. Therefore, the class
+     *  needs to be fetched directly. The classic ways to fetch the class all work differently due to the class
+     *  cluster. The following three approaches produce very different classes between iOS 7 and 8.
+     *
+     *      Class class1 = [[[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:@""]] superclass];
+     *      Class class2 = [NSClassFromString(@"NSURLSessionDataTask") superclass];
+     *      Class class3 = NSClassFromString(@"NSURLSessionTask");
+     *
+     *          NSLog(@"%p - %@, %p - %@, %p - %@",
+     *                class1, NSStringFromClass(class1),
+     *                class2, NSStringFromClass(class2),
+     *                class3, NSStringFromClass(class3));
+     *
+     *  Outputs the following:
+     *  - iOS 7: 0x5da7b28 - __NSCFLocalSessionTask, 0x5da7c90 - __NSCFURLSessionDataTask, 0x1481f4c - NSURLSessionTask
+     *  - iOS 8: 0x6644554 - __NSCFLocalSessionTask, 0x6644fb8 - NSURLSessionTask, 0x6644fb8 - NSURLSessionTask
+     */
+
+    if (NSClassFromString(@"NSURLSessionTask")) {
+        NSURLSessionDataTask *dataTask = [[NSURLSession sessionWithConfiguration:nil] dataTaskWithURL:nil];
+        Class urlSessionTaskClass = [dataTask superclass];
+
+        Method afResumeMethod = class_getInstanceMethod([NSURLSessionTask class], @selector(af_resume));
+        Method afSuspendMethod = class_getInstanceMethod([NSURLSessionTask class], @selector(af_suspend));
+        
+        af_addMethod(urlSessionTaskClass, @selector(af_resume), afResumeMethod);
+        af_addMethod(urlSessionTaskClass, @selector(af_suspend), afSuspendMethod);
+        
+        af_swizzleSelector(urlSessionTaskClass, @selector(resume), @selector(af_resume));
+        af_swizzleSelector(urlSessionTaskClass, @selector(suspend), @selector(af_suspend));
+        
+        [dataTask cancel];
+    }
+}
 @end
 
 #pragma mark -
