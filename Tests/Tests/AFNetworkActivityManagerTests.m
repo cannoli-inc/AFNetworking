@@ -55,6 +55,9 @@
 - (void)tearDown {
     [super tearDown];
     [self.mockApplication stopMocking];
+    
+    self.mockApplication = nil;
+    self.networkActivityIndicatorManager = nil;
 }
 
 #pragma mark -
